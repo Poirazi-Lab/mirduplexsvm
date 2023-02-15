@@ -1,0 +1,288 @@
+
+%function model = mirnaduplexsvmfindertrainq(hairpinSeq, hairpinBracket, ... Nest
+ %   miRnaDuplex, Param) Nest
+%MIRNADUPLEXSVMFINDERTRAINQ Train miRNA:miRNA*-duplex SVM finder
+
+import org.mensxmachina.mirna.*;
+
+%% Sbhsta sto telos
+load(['output' filesep 'data' filesep 'hairpin_' ...
+        miRnaDuplexFinderTrainConfig.sampleName{1}], 'hairpin');
+    load(['output' filesep 'data' filesep 'hairpinbracket_' ...
+        miRnaDuplexFinderTrainConfig.sampleName{1}], 'hairpinBracket');
+    
+    % create duplex matrix
+    miRnaDuplex = [hairpin.miRnaDuplex5pStrand5pEndPos ...
+        hairpin.miRnaDuplex5pStrand3pEndPos ...
+        hairpin.miRnaDuplex3pStrand5pEndPos ...
+        hairpin.miRnaDuplex3pStrand3pEndPos];
+
+hairpinSeq = hairpin.sequence;
+hairpinBracket = hairpinBracket.bracket;
+miRnaDuplex = miRnaDuplex;
+Param = miRnaDuplexFinderTrainConfig.trainParam{1};
+
+%%
+% calculate miRNA:miRNA*-duplex sequence lengths
+miRnaDuplex5pStrandSeqLength = miRnaDuplex(:, 2) - miRnaDuplex(:, 1) + 1;
+miRnaDuplex3pStrandSeqLength = miRnaDuplex(:, 4) - miRnaDuplex(:, 3) + 1;
+
+% get number of hairpins
+numHairpins = length(hairpinSeq);
+
+% initialize overhang sequence lengths
+miRnaDuplexOverhang = zeros(numHairpins, 2);
+
+% initialize hairpin secondary structure features
+hairpin5pArmMatchPos = cell(numHairpins, 1);
+hairpin3pArmMatchPos = cell(numHairpins, 1);
+hairpinLoop5pEndPos = zeros(numHairpins, 1);
+hairpinLoop3pEndPos = zeros(numHairpins, 1);
+hairpinLoopSeqLength = zeros(numHairpins, 1);
+hairpinTipPos = zeros(numHairpins, 1);
+%%
+fprintf('\nFolding hairpins...\n');
+
+for i = 1:numHairpins % for each hairpin
+    
+    % find matches per arm
+    hairpin5pArmMatchPos{i} = strfind(hairpinBracket{i}, '('); 
+    hairpin3pArmMatchPos{i} = strfind(hairpinBracket{i}, ')');
+
+    % loop start = just after last 5' match
+     hairpinLoop5pEndPos(i) = hairpin5pArmMatchPos{i}(end) + 1;
+
+    % loop end = just before first 3' match
+     hairpinLoop3pEndPos(i) = hairpin3pArmMatchPos{i}(1) - 1;
+
+    % calculate loop sequence length
+    hairpinLoopSeqLength(i) = hairpinLoop3pEndPos(i) - hairpinLoop5pEndPos(i) + 1; 
+    
+    % find tip position
+    hairpinTipPos(i) = hairpinLoop5pEndPos(i) - 1 + ceil(hairpinLoopSeqLength(i)/2);
+    
+    % calculate overhang lengths
+    miRnaDuplexOverhang(i, 1) = org.mensxmachina.mirna.duplex5pstrandoverhangseqlengthq(hairpinBracket{i},...
+        hairpin5pArmMatchPos{i}, hairpin3pArmMatchPos{i}, miRnaDuplex(i, :));
+    miRnaDuplexOverhang(i, 2) = org.mensxmachina.mirna.duplex3pstrandoverhangseqlengthq(hairpinBracket{i},...
+        hairpin5pArmMatchPos{i}, hairpin3pArmMatchPos{i}, miRnaDuplex(i, :));
+
+end
+%%
+%%calculate miRNA:miRNA*-duplex sequence distance from loop
+% miRnaDuplex5pStrandSeqDistFromLoop = hairpinLoop5pEndPos - miRnaDuplex(:, 1);
+% miRnaDuplex3pStrandSeqDistFromLoop = miRnaDuplex(:, 4) - hairpinLoop3pEndPos;
+
+% Nestoras start
+% calculate miRNA:miRNA*-duplex sequence distance from hairpin tip
+miRnaDuplex5pStrand5pEndSeqDistFromTip = hairpinTipPos - miRnaDuplex(:, 1);
+miRnaDuplex5pStrand3pEndSeqDistFromTip = hairpinTipPos - miRnaDuplex(:, 2);
+miRnaDuplex3pStrand5pEndSeqDistFromTip = miRnaDuplex(:, 3) - hairpinTipPos;
+miRnaDuplex3pStrand3pEndSeqDistFromTip = miRnaDuplex(:, 4) - hairpinTipPos;
+% Nestoras end
+%%
+% learn candidate-miRNA:miRNA*-duplex model
+candidateMiRnaDuplexModel = struct(...
+    'strand5pSeqLengthLim', [min(miRnaDuplex5pStrandSeqLength) ...
+    max(miRnaDuplex5pStrandSeqLength)], ...
+    'strand3pSeqLengthLim', [min(miRnaDuplex3pStrandSeqLength) ...
+    max(miRnaDuplex3pStrandSeqLength)], ...
+    'strand5pOverhangSeqLengthLim', [min(miRnaDuplexOverhang(:, 1)) ...
+    max(miRnaDuplexOverhang(:, 1))], ...
+    'strand3pOverhangSeqLengthLim', [min(miRnaDuplexOverhang(:, 2)) ...
+    max(miRnaDuplexOverhang(:, 2))] ...
+);
+
+candidateMiRnaDuplexParam = struct('Verbose', Param.Verbose);
+trainCandidateMiRnaDuplexParam = struct('Ratio', Param.Ratio, 'Verbose', Param.Verbose);
+
+hairpinTrainCandidateMiRnaDuplex = cell(numHairpins, 1);
+hairpinTrainCandidateMiRnaDuplexOverhang = cell(numHairpins, 1);
+hairpinTrainCandidateMiRnaDuplexIsMiRnaDuplex = cell(numHairpins, 1);
+%%
+fprintf('\nGenerating and selecting candidate miRNA:miRNA* duplexes...\n');
+
+if Param.CandidateMiRnaDuplexCaching
+    %here = 'here1'
+    % copy cache filename
+    candidateMiRnaDuplexCacheFilename = Param.CandidateMiRnaDuplexCacheFilename;
+    
+    for i = 1:numHairpins % for each hairpin
+ 
+        [candidateMiRnaDuplex candidateMiRnaDuplexOverhang] = ...
+            candidatemirnaduplexwrapper(candidateMiRnaDuplexModel, hairpinBracket{i}, ...
+            hairpin5pArmMatchPos{i}, hairpin3pArmMatchPos{i}, hairpinTipPos(i), ...
+            candidateMiRnaDuplexParam, candidateMiRnaDuplexCacheFilename{i});
+
+        [hairpinTrainCandidateMiRnaDuplex{i} hairpinTrainCandidateMiRnaDuplexOverhang{i}...
+            hairpinTrainCandidateMiRnaDuplexIsMiRnaDuplex{i}] = ...
+            traincandidatemirnaduplexq(candidateMiRnaDuplex, candidateMiRnaDuplexOverhang,...
+            miRnaDuplex(i, :), miRnaDuplexOverhang(i, :), trainCandidateMiRnaDuplexParam);
+
+    end
+    
+else
+    %here = 'here2'
+
+    for i = 1:numHairpins % for each hairpin
+        % candidatemirnaduplexq: ??????? ??? ?? ?????? duplexes ??? ?? 
+        % ?? i hairpin ???????? ??? ????????(???????? ????????? ?????...)
+
+        [candidateMiRnaDuplex candidateMiRnaDuplexOverhang] = ...
+            candidatemirnaduplexq(candidateMiRnaDuplexModel, hairpinBracket{i}, ...
+            hairpin5pArmMatchPos{i}, hairpin3pArmMatchPos{i}, hairpinTipPos(i), ...
+            candidateMiRnaDuplexParam);
+        
+        %traincandidatemirnaduplexq: ?????????? ??? ?????? ?? ???????? ???
+        %?? ?????? ?? ratio ??? ????? ???? ???????????, default
+        %1(pos):100(neg).
+%         hairpinTrainCandidateMiRnaDuplexIsMiRnaDuplex: ??????? ?? ????? ?????? 
+%         ? ???????? ?? candidate. 
+        
+        [hairpinTrainCandidateMiRnaDuplex{i} hairpinTrainCandidateMiRnaDuplexOverhang{i} ...
+            hairpinTrainCandidateMiRnaDuplexIsMiRnaDuplex{i}] = ...
+            traincandidatemirnaduplexq(candidateMiRnaDuplex, candidateMiRnaDuplexOverhang, ...
+            miRnaDuplex(i, :), miRnaDuplexOverhang(i, :), trainCandidateMiRnaDuplexParam);
+
+    end
+
+end
+%%
+% merge duplexes
+
+numTrainCandidateMiRnaDuplexes = numHairpins*(1 + Param.Ratio);
+
+trainCandidateMiRnaHairpinSeq = cell(numTrainCandidateMiRnaDuplexes, 1);
+trainCandidateMiRnaHairpinBracket = cell(numTrainCandidateMiRnaDuplexes, 1);
+trainCandidateMiRnaHairpinTipPos = zeros(numTrainCandidateMiRnaDuplexes, 1);
+trainCandidateMiRnaHairpinLoopSeqLength = zeros(numTrainCandidateMiRnaDuplexes, 1);
+trainCandidateMiRnaDuplex = zeros(numTrainCandidateMiRnaDuplexes, 4);
+trainCandidateMiRnaDuplexOverhang = zeros(numTrainCandidateMiRnaDuplexes, 2);
+%trainCandidateMiRnaDuplexSeqDistFromHairpinLoop = zeros(numTrainCandidateMiRnaDuplexes, 2);
+% Nestoras start
+ trainCandidateMiRnaDuplexSeqDistFromHairpinLoopTip = zeros(numTrainCandidateMiRnaDuplexes, 4); 
+% Nestoras end
+trainCandidateMiRnaDuplexIsMiRnaDuplex = false(numTrainCandidateMiRnaDuplexes, 1);
+
+for i = 1:numHairpins % for each hairpin
+ 
+    % create training candidate miRNA:miRNA* duplex indices
+    ind = ((i - 1)*(1 + Param.Ratio) + 1):(i*(1 + Param.Ratio));
+    
+    % replicate hairpin data for all training candidate miRNA:miRNA* duplexes
+    trainCandidateMiRnaHairpinSeq(ind) = repmat(hairpinSeq(i), 1 + Param.Ratio, 1);
+    trainCandidateMiRnaHairpinBracket(ind) = repmat(hairpinBracket(i), 1 + Param.Ratio, 1);
+    trainCandidateMiRnaHairpinTipPos(ind) = repmat(hairpinTipPos(i), 1 + Param.Ratio, 1);
+    trainCandidateMiRnaHairpinLoopSeqLength(ind) = repmat(hairpinLoopSeqLength(i), 1 + Param.Ratio, 1);
+    
+    % get training candidate miRNA:miRNA* duplexes
+    trainCandidateMiRnaDuplex(ind, :) = hairpinTrainCandidateMiRnaDuplex{i};
+    trainCandidateMiRnaDuplexOverhang(ind, :) = hairpinTrainCandidateMiRnaDuplexOverhang{i};
+    trainCandidateMiRnaDuplexIsMiRnaDuplex(ind) = hairpinTrainCandidateMiRnaDuplexIsMiRnaDuplex{i};
+  
+%     %calculate distance from loop
+%     trainCandidateMiRnaDuplexSeqDistFromHairpinLoop(ind, 1) = hairpinLoop5pEndPos(i) - hairpinTrainCandidateMiRnaDuplex{i}(:, 2);
+%     trainCandidateMiRnaDuplexSeqDistFromHairpinLoop(ind, 2) = hairpinTrainCandidateMiRnaDuplex{i}(:, 3) - hairpinLoop3pEndPos(i);
+    
+    %Nestoras start isws xreiazetai kati akoma edw???
+    % calculate distance from loop tip
+    trainCandidateMiRnaDuplexSeqDistFromHairpinLoopTip(ind, 1) = ...
+        hairpinTipPos(i) - hairpinTrainCandidateMiRnaDuplex{i}(:, 1);
+    trainCandidateMiRnaDuplexSeqDistFromHairpinLoopTip(ind, 2) = ...
+        hairpinTipPos(i) - hairpinTrainCandidateMiRnaDuplex{i}(:, 2);
+   trainCandidateMiRnaDuplexSeqDistFromHairpinLoopTip(ind, 3) = ...
+        hairpinTrainCandidateMiRnaDuplex{i}(:, 3) - hairpinTipPos(i);    
+    trainCandidateMiRnaDuplexSeqDistFromHairpinLoopTip(ind, 4) = ...
+        hairpinTrainCandidateMiRnaDuplex{i}(:, 4) - hairpinTipPos(i);    
+    %Nestoras end
+
+    % clear
+    hairpinTrainCandidateMiRnaDuplex{i} = [];
+    hairpinTrainCandidateMiRnaDuplexIsMiRnaDuplex{i} = [];
+    
+end
+
+clear('hairpinTrainCandidateMiRnaDuplex', 'hairpinTrainCandidateMiRnaDuplexIsMiRnaDuplex');
+
+% learn miRNA:miRNA*-duplex SVM vector model
+
+% copy candidate-miRNA:miRNA*-duplex model
+miRnaDuplexSvmVectorModel = candidateMiRnaDuplexModel; 
+
+% % add additional fields
+% miRnaDuplexSvmVectorModel.strand5pSeqDistFromHairpinLoopLim = [min(miRnaDuplex5pStrandSeqDistFromLoop) max(miRnaDuplex5pStrandSeqDistFromLoop)];
+% miRnaDuplexSvmVectorModel.strand3pSeqDistFromHairpinLoopLim = [min(miRnaDuplex3pStrandSeqDistFromLoop) max(miRnaDuplex3pStrandSeqDistFromLoop)];
+% miRnaDuplexSvmVectorModel.hairpinLoopSeqLengthLim = [min(hairpinLoopSeqLength) max(hairpinLoopSeqLength)];
+
+
+% Nestoras start
+% add additional fields 
+miRnaDuplexSvmVectorModel.miRnaDuplex5pStrand5pEndSeqDistFromTipLim = ...
+    [min(miRnaDuplex5pStrand5pEndSeqDistFromTip) max(miRnaDuplex5pStrand5pEndSeqDistFromTip)];
+
+miRnaDuplexSvmVectorModel.miRnaDuplex5pStrand3pEndSeqDistFromTipLim = ...
+    [min(miRnaDuplex5pStrand3pEndSeqDistFromTip) max(miRnaDuplex5pStrand3pEndSeqDistFromTip)];
+
+miRnaDuplexSvmVectorModel.miRnaDuplex3pStrand5pEndSeqDistFromTipLim = ... 
+    [min(miRnaDuplex3pStrand5pEndSeqDistFromTip) max(miRnaDuplex3pStrand5pEndSeqDistFromTip)];
+
+miRnaDuplexSvmVectorModel.miRnaDuplex3pStrand3pEndSeqDistFromTipLim = ... 
+    [min(miRnaDuplex3pStrand3pEndSeqDistFromTip) max(miRnaDuplex3pStrand3pEndSeqDistFromTip)];
+miRnaDuplexSvmVectorModel.hairpinLoopSeqLengthLim = ...
+    [min(hairpinLoopSeqLength) max(hairpinLoopSeqLength)];
+% Nestoras end
+
+
+miRnaDuplexSvmVectorModel.flankSeqLength = Param.FlankingSequenceLength;
+%% na synexisw apo dw!!! Nestoras
+fprintf('\nCreating SVM input...\n');
+
+%numSeqCols: ???????????? ??? seq 4*theseis gia ta 4 flanking seq (ena ka8e akrh twn mature)
+%(4*miRnaDuplexSvmVectorModel.flankSeqLength) 
+%+ 4* megisto 5p wrimo + 4*3p wrimo.
+
+numSeqCols = 4*(4*miRnaDuplexSvmVectorModel.flankSeqLength + ... 
+    miRnaDuplexSvmVectorModel.strand5pSeqLengthLim(2) + ...
+    miRnaDuplexSvmVectorModel.strand3pSeqLengthLim(2));
+
+% structure
+numBracketCols = numSeqCols/4;
+% oi apostaseis poy xrhsimopoioyntai p.x.
+1. mhkos ths loopas
+2. dyo overhangs
+3. 
+numContinuousCols = 7;
+numCols = numSeqCols + numBracketCols + numContinuousCols;
+
+x = zeros(numTrainCandidateMiRnaDuplexes, numCols);
+
+% for each training candidate miRNA:miRNA* duplex
+for i = 1:numTrainCandidateMiRnaDuplexes 
+    
+    x(i, :) = mirnaduplexsvmvectorq( ...
+        miRnaDuplexSvmVectorModel, ...
+        trainCandidateMiRnaHairpinSeq{i}, ...
+        trainCandidateMiRnaHairpinBracket{i}, ...
+        trainCandidateMiRnaHairpinLoopSeqLength(i), ...
+        trainCandidateMiRnaHairpinTipPos(i), ...
+        trainCandidateMiRnaDuplex(i, :), ...
+        trainCandidateMiRnaDuplexOverhang(i, :), ...
+        trainCandidateMiRnaDuplexSeqDistFromHairpinLoopTip(i, :));
+
+end
+
+group = mirnaduplexsvmgroupq(trainCandidateMiRnaDuplexIsMiRnaDuplex);
+%%
+fprintf('\nTraining SVM...\n');
+
+miRnaDuplexSvmModel = mirnaduplexsvmtrainq(x, group, Param.SvmTrainParam);
+
+% combine models
+model = struct( ...
+    'candidateMiRnaDuplexModel', candidateMiRnaDuplexModel, ...
+    'miRnaDuplexSvmVectorModel', miRnaDuplexSvmVectorModel, ...
+    'miRnaDuplexSvmModel', miRnaDuplexSvmModel ...
+    );
+
+%end Nest
+
