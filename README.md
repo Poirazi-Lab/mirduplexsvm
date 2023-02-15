@@ -1,5 +1,7 @@
 # README
 
+(migrated repo from Karathanasis N, personal repo: [bitbucket.org/nestoras_karathanasis/mirduplexsvm/](https://bitbucket.org/nestoras_karathanasis/mirduplexsvm/))
+
 ## What is this repository for?
 
 Provide MiRduplexSVM code to the scientific community.
